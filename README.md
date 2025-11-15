@@ -87,18 +87,6 @@ Then:
 
 ---
 
-## 🧾 .gitignore
 
-.env
-faiss_index/
-.venv/
 
----
 
-## 👍 Good to Mention in Interviews
-
-- Adjustable chunk size & overlap
-- Retrieval first → then LLM
-- Gemini is set with low temperature to avoid hallucinations
-- FAISS makes the app fully local and offline after embedding
-- Can be extended with source previews, streaming responses, or Pinecone/Chroma
