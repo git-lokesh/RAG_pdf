@@ -12,7 +12,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 
-load_dotenv()
+load_dotenv()  # loads .env at project root
 
 def extract_text_from_pdfs(pdf_files):
     text = ""
@@ -95,9 +95,11 @@ def main():
     st.set_page_config(page_title="PDF RAG Chat", page_icon="📚")
     st.title("Chat with PDFs")
 
-    env_api_key = os.getenv("GOOGLE_API_KEY", "")
-    api_key_input = st.sidebar.text_input("Google API Key", value=env_api_key, type="password")
-    api_key = api_key_input.strip() or env_api_key
+    # API key is read from environment (.env) only — not from the frontend
+    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+
+    # small notice so users know the app uses server-side key
+    st.sidebar.markdown("**Server-side:** Using `GOOGLE_API_KEY` from environment.")
 
     if st.sidebar.button("Clear conversation"):
         st.session_state.conversation_history = []
@@ -105,7 +107,9 @@ def main():
     uploaded_files = st.sidebar.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 
     if st.sidebar.button("Process PDFs"):
-        if uploaded_files and api_key:
+        if not api_key:
+            st.sidebar.error("Server API key not found. Add GOOGLE_API_KEY to .env.")
+        elif uploaded_files:
             text = extract_text_from_pdfs(uploaded_files)
             if text:
                 chunks = split_text_to_chunks(text)
@@ -117,7 +121,7 @@ def main():
             else:
                 st.error("No extractable text found.")
         else:
-            st.sidebar.warning("Upload PDFs and enter API key.")
+            st.sidebar.warning("Upload PDFs first.")
 
     if "conversation_history" not in st.session_state:
         st.session_state.conversation_history = []
@@ -126,7 +130,7 @@ def main():
 
     if question:
         if not api_key:
-            st.warning("Enter API key.")
+            st.warning("Server API key not found. Add GOOGLE_API_KEY to .env.")
         else:
             try:
                 store = load_vectorstore(api_key)
