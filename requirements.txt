@@ -1,11 +1,6 @@
+streamlit 
+PyPDF2 
+langchain 
+langchain-community 
+langchain-text-splitters 
 faiss-cpu
-google-ai-generativelanguage
-langchain
-langchain-community
-langchain-core
-langchain-google-genai
-langchain-text-splitters
-pandas
-PyPDF2
-python-dotenv
-streamlit

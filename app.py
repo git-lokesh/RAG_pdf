@@ -1,18 +1,11 @@
-import os
-from datetime import datetime
-import base64
-
-import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-
-load_dotenv()  # loads .env at project root
+from langchain_core.output_parsers import StrOutputParser
 
 def extract_text_from_pdfs(pdf_files):
     text = ""
@@ -22,45 +15,20 @@ def extract_text_from_pdfs(pdf_files):
             text += (page.extract_text() or "") + "\n"
     return text.strip()
 
-def split_text_to_chunks(text, chunk_size=2000, chunk_overlap=200):
+def split_text_to_chunks(text, chunk_size=1500, chunk_overlap=200):
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     return splitter.split_text(text)
 
-def build_vectorstore(chunks, api_key):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-    store = FAISS.from_texts(chunks, embeddings)
-    store.save_local("faiss_index")
+@st.cache_data(show_spinner="Indexing documents...")
+def get_vector_store(_chunks):
+    if not _chunks:
+        return None
+    embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+    store = FAISS.from_texts(_chunks, embeddings)
     return store
 
-def load_vectorstore(api_key):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-    return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-
-def get_top_docs(store, query, k=6):
-    return store.similarity_search(query, k=k)
-
-def call_llm_with_fallback(llm, prompt_text):
-    try:
-        return llm(prompt_text)
-    except Exception:
-        try:
-            return llm.generate([prompt_text])
-        except Exception:
-            try:
-                return llm.predict(prompt_text)
-            except Exception:
-                return None
-
-def extract_text_from_docs(docs):
-    parts = []
-    for d in docs:
-        content = getattr(d, "page_content", None) or getattr(d, "content", None) or str(d)
-        parts.append(content)
-    return "\n\n---\n\n".join(parts)
-
-def answer_question(question, store, api_key):
-    docs = get_top_docs(store, question, k=6)
-    context = extract_text_from_docs(docs)
+def create_rag_chain():
+    llm = ChatOllama(model="llama3.1:8b", temperature=0.2)
     prompt_template = """Answer the question using only the provided context. If the information is not present, say so clearly.
 
 Context:
@@ -71,93 +39,80 @@ Question:
 
 Answer:"""
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    prompt_text = prompt.format(context=context, question=question)
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2, google_api_key=api_key)
-    resp = call_llm_with_fallback(llm, prompt_text)
-    if resp is None:
-        raise RuntimeError("LLM call failed (no usable interface).")
-    if isinstance(resp, str):
-        return resp
-    if isinstance(resp, dict) and "output_text" in resp:
-        return resp["output_text"]
+    output_parser = StrOutputParser()
+    chain = prompt | llm | output_parser
+    return chain
+
+def answer_question(question, store, chain):
+    if not store:
+        return "Error: The document vector store is not initialized."
+    docs = store.similarity_search(question, k=4)
+    context = "\n\n---\n\n".join([d.page_content for d in docs])
     try:
-        if hasattr(resp, "generations"):
-            gens = resp.generations
-            if isinstance(gens, list) and len(gens) > 0 and len(gens[0]) > 0:
-                return gens[0][0].text
-        if hasattr(resp, "text"):
-            return resp.text
-    except Exception:
-        pass
-    return str(resp)
+        response = chain.invoke({"context": context, "question": question})
+        return response
+    except Exception as e:
+        st.error(f"Error invoking LLM: {e}")
+        return "There was an error processing your question."
 
 def main():
-    st.set_page_config(page_title="PDF RAG Chat", page_icon="📚")
-    st.title("Chat with PDFs")
-
-    # API key is read from environment (.env) only — not from the frontend
-    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
-
-    # small notice so users know the app uses server-side key
-    st.sidebar.markdown("**Server-side:** Using `GOOGLE_API_KEY` from environment.")
-
-    if st.sidebar.button("Clear conversation"):
-        st.session_state.conversation_history = []
-
-    uploaded_files = st.sidebar.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
-
-    if st.sidebar.button("Process PDFs"):
-        if not api_key:
-            st.sidebar.error("Server API key not found. Add GOOGLE_API_KEY to .env.")
-        elif uploaded_files:
-            text = extract_text_from_pdfs(uploaded_files)
-            if text:
-                chunks = split_text_to_chunks(text)
-                try:
-                    build_vectorstore(chunks, api_key)
-                    st.success("Index built.")
-                except Exception as e:
-                    st.error(f"Error building index: {e}")
-            else:
-                st.error("No extractable text found.")
-        else:
-            st.sidebar.warning("Upload PDFs first.")
+    st.set_page_config(page_title="Local PDF Chat 📚", layout="centered")
+    st.title("Chat with Your PDFs (Locally)")
 
     if "conversation_history" not in st.session_state:
         st.session_state.conversation_history = []
+    if "vector_store" not in st.session_state:
+        st.session_state.vector_store = None
+    if "rag_chain" not in st.session_state:
+        st.session_state.rag_chain = create_rag_chain()
 
-    question = st.text_input("Ask a question")
+    with st.sidebar:
+        st.subheader("Your Documents")
+        uploaded_files = st.file_uploader(
+            "Upload your PDFs here and click 'Process'",
+            type=["pdf"],
+            accept_multiple_files=True
+        )
+
+        if st.button("Process PDFs"):
+            if uploaded_files:
+                with st.spinner("Extracting text..."):
+                    text = extract_text_from_pdfs(uploaded_files)
+                if text:
+                    with st.spinner("Splitting text into chunks..."):
+                        chunks = split_text_to_chunks(text)
+                    st.session_state.vector_store = get_vector_store(chunks)
+                    st.success("PDFs processed! You can now ask questions.")
+                else:
+                    st.error("No extractable text found in the PDFs.")
+            else:
+                st.warning("Please upload at least one PDF.")
+
+        st.divider()
+
+        if st.button("Clear Conversation"):
+            st.session_state.conversation_history = []
+            st.success("Conversation cleared.")
+
+    for q, a in st.session_state.conversation_history:
+        st.chat_message("user").write(q)
+        st.chat_message("assistant").write(a)
+
+    question = st.chat_input("Ask a question about your documents...")
 
     if question:
-        if not api_key:
-            st.warning("Server API key not found. Add GOOGLE_API_KEY to .env.")
+        if st.session_state.vector_store is None:
+            st.warning("Please upload and process your PDFs first.")
         else:
-            try:
-                store = load_vectorstore(api_key)
-            except Exception as e:
-                st.error(f"Vector store not found. Process PDFs first. {e}")
-                store = None
-
-            if store is not None:
-                try:
-                    answer = answer_question(question, store, api_key)
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.session_state.conversation_history.append((question, answer, "Google AI", timestamp))
-                    st.success("Done.")
-                except Exception as e:
-                    st.error(f"Error generating answer: {e}")
-
-    for q, a, model, ts in reversed(st.session_state.conversation_history):
-        st.markdown(f"**Q — {q}**")
-        st.markdown(f"> {a}")
-        st.caption(f"{model} • {ts}")
-        st.markdown("---")
-
-    if st.session_state.conversation_history:
-        df = pd.DataFrame(st.session_state.conversation_history, columns=["Question", "Answer", "Model", "Timestamp"])
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        st.markdown(f'<a href="data:file/csv;base64,{b64}" download="conversation_history.csv">Download conversation CSV</a>', unsafe_allow_html=True)
+            st.chat_message("user").write(question)
+            with st.spinner("Llama is thinking..."):
+                answer = answer_question(
+                    question,
+                    st.session_state.vector_store,
+                    st.session_state.rag_chain
+                )
+            st.chat_message("assistant").write(answer)
+            st.session_state.conversation_history.append((question, answer))
 
 if __name__ == "__main__":
     main()
