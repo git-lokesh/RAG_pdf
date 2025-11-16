@@ -14,7 +14,7 @@ Everything runs on your machine using Ollama, FAISS, and Streamlit.
 
 ## Requirements:
 ### Install dependencies:
-    pip install streamlit PyPDF2 langchain_community langchain_core langchain-text-splitters
+    pip install -r requirements.txt
 
 ### Install Ollama:
     https://ollama.com
